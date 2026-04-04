@@ -386,6 +386,96 @@ app.post('/api/vendors/:vendorId/products', async (req, res) => {
     }
 });
 
+// ---------- Vendor Login ----------
+app.post('/api/vendors/login', async (req, res) => {
+    const { phone, pin } = req.body;
+    
+    if (!phone || !pin) {
+        return res.status(400).json({ error: 'Phone and PIN required' });
+    }
+    
+    try {
+        const result = await pool.query(
+            'SELECT id, name, phone, location FROM vendors WHERE phone = $1 AND pin = $2',
+            [phone, pin]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(401).json({ error: 'Invalid phone number or PIN' });
+        }
+        
+        res.json({ 
+            success: true, 
+            vendor: result.rows[0]
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+// ---------- Rider Login ----------
+app.post('/api/riders/login', async (req, res) => {
+    const { phone, pin } = req.body;
+    
+    if (!phone || !pin) {
+        return res.status(400).json({ error: 'Phone and PIN required' });
+    }
+    
+    try {
+        const result = await pool.query(
+            'SELECT id, name, phone, available FROM riders WHERE phone = $1 AND pin = $2',
+            [phone, pin]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(401).json({ error: 'Invalid phone number or PIN' });
+        }
+        
+        res.json({ 
+            success: true, 
+            rider: result.rows[0]
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+// ---------- Get Current Vendor (verify session) ----------
+app.get('/api/vendors/:vendorId/verify', async (req, res) => {
+    const { vendorId } = req.params;
+    try {
+        const result = await pool.query(
+            'SELECT id, name, phone FROM vendors WHERE id = $1',
+            [vendorId]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Vendor not found' });
+        }
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: 'Verification failed' });
+    }
+});
+
+// ---------- Get Current Rider (verify session) ----------
+app.get('/api/riders/:riderId/verify', async (req, res) => {
+    const { riderId } = req.params;
+    try {
+        const result = await pool.query(
+            'SELECT id, name, phone FROM riders WHERE id = $1',
+            [riderId]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Rider not found' });
+        }
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: 'Verification failed' });
+    }
+});
+
 // Update a product
 app.put('/api/products/:productId', async (req, res) => {
     const { productId } = req.params;
