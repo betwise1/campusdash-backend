@@ -7,6 +7,8 @@ const multer = require('multer');
 const cloudinary = require('cloudinary').v2;
 const crypto = require('crypto');
 const axios = require('axios');
+const bcrypt = require('bcrypt');
+const jwt = require('jsonwebtoken');
 
 const app = express();
 
@@ -40,6 +42,397 @@ cloudinary.config({
 // Multer memory storage
 const storage = multer.memoryStorage();
 const upload = multer({ storage });
+
+// JWT Configuration
+const JWT_SECRET = process.env.JWT_SECRET || 'campusdash-super-secret-key-change-in-production';
+const JWT_EXPIRES_IN = '7d';
+
+// ========== AUTH MIDDLEWARE ==========
+function authenticateVendor(req, res, next) {
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+        return res.status(401).json({ error: 'Access denied. No token provided.' });
+    }
+    
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        req.vendorId = decoded.id;
+        req.vendor = decoded;
+        next();
+    } catch (err) {
+        return res.status(401).json({ error: 'Invalid or expired token.' });
+    }
+}
+
+function authenticateRider(req, res, next) {
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+        return res.status(401).json({ error: 'Access denied. No token provided.' });
+    }
+    
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        req.riderId = decoded.id;
+        req.rider = decoded;
+        next();
+    } catch (err) {
+        return res.status(401).json({ error: 'Invalid or expired token.' });
+    }
+}
+
+// ========== VENDOR AUTH ENDPOINTS ==========
+
+// Vendor Registration
+app.post('/api/vendors/register', async (req, res) => {
+    const { name, email, phone, password, location } = req.body;
+    
+    if (!name || !email || !phone || !password) {
+        return res.status(400).json({ error: 'All fields are required' });
+    }
+    
+    try {
+        // Check if vendor already exists
+        const existingVendor = await pool.query(
+            'SELECT id FROM vendors WHERE email = $1 OR phone = $2',
+            [email, phone]
+        );
+        
+        if (existingVendor.rows.length > 0) {
+            return res.status(400).json({ error: 'Vendor already exists with this email or phone' });
+        }
+        
+        // Hash password
+        const saltRounds = 10;
+        const passwordHash = await bcrypt.hash(password, saltRounds);
+        
+        // Create vendor
+        const result = await pool.query(
+            `INSERT INTO vendors (name, email, phone, password_hash, location, created_at, is_active)
+             VALUES ($1, $2, $3, $4, $5, NOW(), true)
+             RETURNING id, name, email, phone`,
+            [name, email, phone, passwordHash, location]
+        );
+        
+        // Create wallet for vendor
+        await pool.query(
+            `INSERT INTO vendor_wallets (vendor_id, balance, pending_balance, total_earned)
+             VALUES ($1, 0, 0, 0)
+             ON CONFLICT (vendor_id) DO NOTHING`,
+            [result.rows[0].id]
+        );
+        
+        res.status(201).json({
+            success: true,
+            message: 'Vendor registered successfully',
+            vendor: result.rows[0]
+        });
+    } catch (err) {
+        console.error('Registration error:', err);
+        res.status(500).json({ error: 'Registration failed' });
+    }
+});
+
+// Vendor Login
+app.post('/api/vendors/login', async (req, res) => {
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+        return res.status(400).json({ error: 'Email and password are required' });
+    }
+    
+    try {
+        // Find vendor by email
+        const result = await pool.query(
+            'SELECT id, name, email, phone, password_hash, is_active FROM vendors WHERE email = $1',
+            [email]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+        
+        const vendor = result.rows[0];
+        
+        // Check if account is active
+        if (!vendor.is_active) {
+            return res.status(401).json({ error: 'Account is deactivated. Contact support.' });
+        }
+        
+        // Verify password
+        const validPassword = await bcrypt.compare(password, vendor.password_hash);
+        if (!validPassword) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+        
+        // Update last login
+        await pool.query(
+            'UPDATE vendors SET last_login = NOW() WHERE id = $1',
+            [vendor.id]
+        );
+        
+        // Generate JWT token
+        const token = jwt.sign(
+            { id: vendor.id, name: vendor.name, email: vendor.email, role: 'vendor' },
+            JWT_SECRET,
+            { expiresIn: JWT_EXPIRES_IN }
+        );
+        
+        res.json({
+            success: true,
+            token,
+            vendor: {
+                id: vendor.id,
+                name: vendor.name,
+                email: vendor.email,
+                phone: vendor.phone
+            }
+        });
+    } catch (err) {
+        console.error('Login error:', err);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+// Get current vendor (verify token)
+app.get('/api/vendors/me', authenticateVendor, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT id, name, email, phone, location, is_active, created_at, last_login FROM vendors WHERE id = $1',
+            [req.vendorId]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Vendor not found' });
+        }
+        
+        res.json(result.rows[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to get vendor info' });
+    }
+});
+
+// ========== RIDER AUTH ENDPOINTS ==========
+
+// Rider Registration
+app.post('/api/riders/register', async (req, res) => {
+    const { name, email, phone, password } = req.body;
+    
+    if (!name || !email || !phone || !password) {
+        return res.status(400).json({ error: 'All fields are required' });
+    }
+    
+    try {
+        // Check if rider already exists
+        const existingRider = await pool.query(
+            'SELECT id FROM riders WHERE email = $1 OR phone = $2',
+            [email, phone]
+        );
+        
+        if (existingRider.rows.length > 0) {
+            return res.status(400).json({ error: 'Rider already exists with this email or phone' });
+        }
+        
+        // Hash password
+        const saltRounds = 10;
+        const passwordHash = await bcrypt.hash(password, saltRounds);
+        
+        // Create rider
+        const result = await pool.query(
+            `INSERT INTO riders (name, email, phone, password_hash, created_at, is_active)
+             VALUES ($1, $2, $3, $4, NOW(), true)
+             RETURNING id, name, email, phone`,
+            [name, email, phone, passwordHash]
+        );
+        
+        // Create wallet for rider
+        await pool.query(
+            `INSERT INTO rider_wallets (rider_id, balance, pending_balance, total_earned)
+             VALUES ($1, 0, 0, 0)
+             ON CONFLICT (rider_id) DO NOTHING`,
+            [result.rows[0].id]
+        );
+        
+        res.status(201).json({
+            success: true,
+            message: 'Rider registered successfully',
+            rider: result.rows[0]
+        });
+    } catch (err) {
+        console.error('Registration error:', err);
+        res.status(500).json({ error: 'Registration failed' });
+    }
+});
+
+// Rider Login
+app.post('/api/riders/login', async (req, res) => {
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+        return res.status(400).json({ error: 'Email and password are required' });
+    }
+    
+    try {
+        // Find rider by email
+        const result = await pool.query(
+            'SELECT id, name, email, phone, password_hash, is_active FROM riders WHERE email = $1',
+            [email]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+        
+        const rider = result.rows[0];
+        
+        // Check if account is active
+        if (!rider.is_active) {
+            return res.status(401).json({ error: 'Account is deactivated. Contact support.' });
+        }
+        
+        // Verify password
+        const validPassword = await bcrypt.compare(password, rider.password_hash);
+        if (!validPassword) {
+            return res.status(401).json({ error: 'Invalid email or password' });
+        }
+        
+        // Update last login
+        await pool.query(
+            'UPDATE riders SET last_login = NOW() WHERE id = $1',
+            [rider.id]
+        );
+        
+        // Generate JWT token
+        const token = jwt.sign(
+            { id: rider.id, name: rider.name, email: rider.email, role: 'rider' },
+            JWT_SECRET,
+            { expiresIn: JWT_EXPIRES_IN }
+        );
+        
+        res.json({
+            success: true,
+            token,
+            rider: {
+                id: rider.id,
+                name: rider.name,
+                email: rider.email,
+                phone: rider.phone
+            }
+        });
+    } catch (err) {
+        console.error('Login error:', err);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+// Get current rider (verify token)
+app.get('/api/riders/me', authenticateRider, async (req, res) => {
+    try {
+        const result = await pool.query(
+            'SELECT id, name, email, phone, is_active, created_at, last_login FROM riders WHERE id = $1',
+            [req.riderId]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Rider not found' });
+        }
+        
+        res.json(result.rows[0]);
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Failed to get rider info' });
+    }
+});
+
+// Legacy PIN-based login (keep for backward compatibility)
+app.post('/api/vendors/login-legacy', async (req, res) => {
+    const { phone, pin } = req.body;
+    
+    if (!phone || !pin) {
+        return res.status(400).json({ error: 'Phone and PIN required' });
+    }
+    
+    try {
+        const result = await pool.query(
+            'SELECT id, name, phone, location FROM vendors WHERE phone = $1 AND pin = $2',
+            [phone, pin]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(401).json({ error: 'Invalid phone number or PIN' });
+        }
+        
+        res.json({ 
+            success: true, 
+            vendor: result.rows[0]
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+app.post('/api/riders/login-legacy', async (req, res) => {
+    const { phone, pin } = req.body;
+    
+    if (!phone || !pin) {
+        return res.status(400).json({ error: 'Phone and PIN required' });
+    }
+    
+    try {
+        const result = await pool.query(
+            'SELECT id, name, phone, available FROM riders WHERE phone = $1 AND pin = $2',
+            [phone, pin]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(401).json({ error: 'Invalid phone number or PIN' });
+        }
+        
+        res.json({ 
+            success: true, 
+            rider: result.rows[0]
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+// Get vendor by ID (public)
+app.get('/api/vendors/:vendorId/verify', async (req, res) => {
+    const { vendorId } = req.params;
+    try {
+        const result = await pool.query(
+            'SELECT id, name, phone FROM vendors WHERE id = $1',
+            [vendorId]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Vendor not found' });
+        }
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: 'Verification failed' });
+    }
+});
+
+app.get('/api/riders/:riderId/verify', async (req, res) => {
+    const { riderId } = req.params;
+    try {
+        const result = await pool.query(
+            'SELECT id, name, phone FROM riders WHERE id = $1',
+            [riderId]
+        );
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Rider not found' });
+        }
+        res.json(result.rows[0]);
+    } catch (err) {
+        res.status(500).json({ error: 'Verification failed' });
+    }
+});
 
 // ---------- Payment Initiation ----------
 app.post('/api/orders/initiate-payment', async (req, res) => {
@@ -386,96 +779,6 @@ app.post('/api/vendors/:vendorId/products', async (req, res) => {
     }
 });
 
-// ---------- Vendor Login ----------
-app.post('/api/vendors/login', async (req, res) => {
-    const { phone, pin } = req.body;
-    
-    if (!phone || !pin) {
-        return res.status(400).json({ error: 'Phone and PIN required' });
-    }
-    
-    try {
-        const result = await pool.query(
-            'SELECT id, name, phone, location FROM vendors WHERE phone = $1 AND pin = $2',
-            [phone, pin]
-        );
-        
-        if (result.rows.length === 0) {
-            return res.status(401).json({ error: 'Invalid phone number or PIN' });
-        }
-        
-        res.json({ 
-            success: true, 
-            vendor: result.rows[0]
-        });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Login failed' });
-    }
-});
-
-// ---------- Rider Login ----------
-app.post('/api/riders/login', async (req, res) => {
-    const { phone, pin } = req.body;
-    
-    if (!phone || !pin) {
-        return res.status(400).json({ error: 'Phone and PIN required' });
-    }
-    
-    try {
-        const result = await pool.query(
-            'SELECT id, name, phone, available FROM riders WHERE phone = $1 AND pin = $2',
-            [phone, pin]
-        );
-        
-        if (result.rows.length === 0) {
-            return res.status(401).json({ error: 'Invalid phone number or PIN' });
-        }
-        
-        res.json({ 
-            success: true, 
-            rider: result.rows[0]
-        });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Login failed' });
-    }
-});
-
-// ---------- Get Current Vendor (verify session) ----------
-app.get('/api/vendors/:vendorId/verify', async (req, res) => {
-    const { vendorId } = req.params;
-    try {
-        const result = await pool.query(
-            'SELECT id, name, phone FROM vendors WHERE id = $1',
-            [vendorId]
-        );
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'Vendor not found' });
-        }
-        res.json(result.rows[0]);
-    } catch (err) {
-        res.status(500).json({ error: 'Verification failed' });
-    }
-});
-
-// ---------- Get Current Rider (verify session) ----------
-app.get('/api/riders/:riderId/verify', async (req, res) => {
-    const { riderId } = req.params;
-    try {
-        const result = await pool.query(
-            'SELECT id, name, phone FROM riders WHERE id = $1',
-            [riderId]
-        );
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'Rider not found' });
-        }
-        res.json(result.rows[0]);
-    } catch (err) {
-        res.status(500).json({ error: 'Verification failed' });
-    }
-});
-
 // Update a product
 app.put('/api/products/:productId', async (req, res) => {
     const { productId } = req.params;
@@ -499,6 +802,37 @@ app.put('/api/products/:productId', async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Failed to update product' });
+    }
+});
+
+// Delete a product
+app.delete('/api/products/:productId', async (req, res) => {
+    const { productId } = req.params;
+    try {
+        const productCheck = await pool.query(
+            'SELECT id FROM products WHERE id = $1',
+            [productId]
+        );
+        if (productCheck.rows.length === 0) {
+            return res.status(404).json({ error: 'Product not found' });
+        }
+        
+        const result = await pool.query(
+            'DELETE FROM products WHERE id = $1 RETURNING id',
+            [productId]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(404).json({ error: 'Product not found' });
+        }
+        
+        res.json({ success: true, message: 'Product deleted successfully' });
+    } catch (err) {
+        console.error('Delete error:', err);
+        if (err.code === '23503') {
+            return res.status(400).json({ error: 'Cannot delete: product has existing orders' });
+        }
+        res.status(500).json({ error: 'Failed to delete product', details: err.message });
     }
 });
 
@@ -556,37 +890,6 @@ app.put('/api/vendors/:vendorId/location', async (req, res) => {
     } catch (err) {
         console.error('Error updating vendor location:', err);
         res.status(500).json({ error: 'Failed to update vendor location', details: err.message });
-    }
-});
-
-// Delete a product
-app.delete('/api/products/:productId', async (req, res) => {
-    const { productId } = req.params;
-    try {
-        const productCheck = await pool.query(
-            'SELECT id FROM products WHERE id = $1',
-            [productId]
-        );
-        if (productCheck.rows.length === 0) {
-            return res.status(404).json({ error: 'Product not found' });
-        }
-        
-        const result = await pool.query(
-            'DELETE FROM products WHERE id = $1 RETURNING id',
-            [productId]
-        );
-        
-        if (result.rows.length === 0) {
-            return res.status(404).json({ error: 'Product not found' });
-        }
-        
-        res.json({ success: true, message: 'Product deleted successfully' });
-    } catch (err) {
-        console.error('Delete error:', err);
-        if (err.code === '23503') {
-            return res.status(400).json({ error: 'Cannot delete: product has existing orders' });
-        }
-        res.status(500).json({ error: 'Failed to delete product', details: err.message });
     }
 });
 
@@ -732,7 +1035,6 @@ app.patch('/api/orders/:orderId/deliver', async (req, res) => {
     try {
         await client.query('BEGIN');
         
-        // Get order details with vendor and rider info
         const orderResult = await client.query(
             `SELECT o.*, v.name as vendor_name, v.id as vendor_id, r.id as rider_id
              FROM orders o 
@@ -750,26 +1052,22 @@ app.patch('/api/orders/:orderId/deliver', async (req, res) => {
         const order = orderResult.rows[0];
         const actualRiderId = riderId || order.rider_id;
         
-        // Check if order is already delivered
         if (order.status === 'delivered') {
             await client.query('ROLLBACK');
             return res.status(400).json({ error: 'Order already delivered' });
         }
         
-        // Check if order has a rider assigned
         if (!actualRiderId) {
             await client.query('ROLLBACK');
             return res.status(400).json({ error: 'No rider assigned to this order' });
         }
         
-        // Calculate earnings
         const commissionRate = 0.12;
         const subtotal = parseFloat(order.subtotal);
         const commission = subtotal * commissionRate;
         const vendorEarnings = subtotal - commission;
-        const riderEarnings = 4.00; // Rider gets ₵4 per delivery (out of ₵5 delivery fee)
+        const riderEarnings = 4.00;
         
-        // Update order status to delivered
         const orderUpdateResult = await client.query(
             `UPDATE orders 
              SET status = 'delivered', 
@@ -779,8 +1077,7 @@ app.patch('/api/orders/:orderId/deliver', async (req, res) => {
             [orderId]
         );
         
-        // CREDIT VENDOR
-        // Check if vendor wallet exists
+        // Credit vendor
         const vendorWalletCheck = await client.query(
             'SELECT id FROM vendor_wallets WHERE vendor_id = $1',
             [order.vendor_id]
@@ -812,8 +1109,7 @@ app.patch('/api/orders/:orderId/deliver', async (req, res) => {
              `ORD-${orderId}-${Date.now()}`]
         );
         
-        // CREDIT RIDER
-        // Check if rider wallet exists
+        // Credit rider
         const riderWalletCheck = await client.query(
             'SELECT id FROM rider_wallets WHERE rider_id = $1',
             [actualRiderId]
@@ -863,49 +1159,6 @@ app.patch('/api/orders/:orderId/deliver', async (req, res) => {
     }
 });
 
-// Debug endpoint - check rider's today's earnings
-app.get('/api/debug/rider-earnings/:riderId', async (req, res) => {
-    const { riderId } = req.params;
-    try {
-        // Get today's date (start of day)
-        const today = new Date();
-        today.setHours(0, 0, 0, 0);
-        
-        // Get all delivered orders for this rider today
-        const ordersResult = await pool.query(`
-            SELECT id, delivered_at, status 
-            FROM orders 
-            WHERE rider_id = $1 AND status = 'delivered' AND delivered_at >= $2
-            ORDER BY delivered_at DESC
-        `, [riderId, today]);
-        
-        // Get transactions from rider_transactions
-        const transactionsResult = await pool.query(`
-            SELECT * FROM rider_transactions 
-            WHERE rider_id = $1 AND type = 'earning' AND created_at >= $2
-            ORDER BY created_at DESC
-        `, [riderId, today]);
-        
-        // Get wallet balance
-        const walletResult = await pool.query(`
-            SELECT * FROM rider_wallets WHERE rider_id = $1
-        `, [riderId]);
-        
-        res.json({
-            rider_id: riderId,
-            orders_today: ordersResult.rows,
-            orders_count: ordersResult.rows.length,
-            transactions_today: transactionsResult.rows,
-            transactions_count: transactionsResult.rows.length,
-            wallet: walletResult.rows[0] || null,
-            calculated_earnings: ordersResult.rows.length * 4
-        });
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: err.message });
-    }
-});
-
 // ---------- Rider Payment Endpoints ----------
 
 // Get rider wallet balance and transactions
@@ -932,7 +1185,6 @@ app.get('/api/riders/:riderId/wallet', async (req, res) => {
             [riderId]
         );
         
-        // Get rider details
         const riderResult = await pool.query(
             'SELECT id, name, phone, mobile_money_number, total_earned FROM riders WHERE id = $1',
             [riderId]
@@ -979,7 +1231,7 @@ app.post('/api/riders/:riderId/request-payout', async (req, res) => {
         return res.status(400).json({ error: 'Invalid amount' });
     }
     
-    const minPayout = 50; // Minimum ₵50 to withdraw
+    const minPayout = 50;
     if (amount < minPayout) {
         return res.status(400).json({ error: `Minimum payout amount is ₵${minPayout}` });
     }
@@ -988,7 +1240,6 @@ app.post('/api/riders/:riderId/request-payout', async (req, res) => {
     try {
         await client.query('BEGIN');
         
-        // Get current balance
         const walletResult = await client.query(
             'SELECT balance FROM rider_wallets WHERE rider_id = $1 FOR UPDATE',
             [riderId]
@@ -1001,7 +1252,6 @@ app.post('/api/riders/:riderId/request-payout', async (req, res) => {
             return res.status(400).json({ error: 'Insufficient balance' });
         }
         
-        // Get rider's mobile number if not provided
         let payoutNumber = mobile_number;
         if (!payoutNumber) {
             const riderResult = await client.query(
@@ -1011,7 +1261,6 @@ app.post('/api/riders/:riderId/request-payout', async (req, res) => {
             payoutNumber = riderResult.rows[0]?.mobile_money_number;
         }
         
-        // Create payout request
         const payoutResult = await client.query(
             `INSERT INTO rider_payouts (rider_id, amount, payment_method, mobile_number, status)
              VALUES ($1, $2, 'mobile_money', $3, 'pending')
@@ -1019,13 +1268,11 @@ app.post('/api/riders/:riderId/request-payout', async (req, res) => {
             [riderId, amount, payoutNumber]
         );
         
-        // Deduct from balance
         await client.query(
             'UPDATE rider_wallets SET balance = balance - $1 WHERE rider_id = $2',
             [amount, riderId]
         );
         
-        // Record transaction
         await client.query(
             `INSERT INTO rider_transactions (rider_id, type, amount, description, status, reference)
              VALUES ($1, 'payout', $2, 'Payout request initiated', 'completed', $3)`,
@@ -1067,6 +1314,45 @@ app.patch('/api/admin/rider-payouts/:payoutId/process', async (req, res) => {
     } catch (err) {
         console.error(err);
         res.status(500).json({ error: 'Failed to process payout' });
+    }
+});
+
+// Debug endpoint - check rider's today's earnings
+app.get('/api/debug/rider-earnings/:riderId', async (req, res) => {
+    const { riderId } = req.params;
+    try {
+        const today = new Date();
+        today.setHours(0, 0, 0, 0);
+        
+        const ordersResult = await pool.query(`
+            SELECT id, delivered_at, status 
+            FROM orders 
+            WHERE rider_id = $1 AND status = 'delivered' AND delivered_at >= $2
+            ORDER BY delivered_at DESC
+        `, [riderId, today]);
+        
+        const transactionsResult = await pool.query(`
+            SELECT * FROM rider_transactions 
+            WHERE rider_id = $1 AND type = 'earning' AND created_at >= $2
+            ORDER BY created_at DESC
+        `, [riderId, today]);
+        
+        const walletResult = await pool.query(`
+            SELECT * FROM rider_wallets WHERE rider_id = $1
+        `, [riderId]);
+        
+        res.json({
+            rider_id: riderId,
+            orders_today: ordersResult.rows,
+            orders_count: ordersResult.rows.length,
+            transactions_today: transactionsResult.rows,
+            transactions_count: transactionsResult.rows.length,
+            wallet: walletResult.rows[0] || null,
+            calculated_earnings: ordersResult.rows.length * 4
+        });
+    } catch (err) {
+        console.error(err);
+        res.status(500).json({ error: err.message });
     }
 });
 
