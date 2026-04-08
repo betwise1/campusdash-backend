@@ -44,7 +44,7 @@ const storage = multer.memoryStorage();
 const upload = multer({ storage });
 
 // JWT Configuration
-const JWT_SECRET = process.env.JWT_SECRET || 'campusdash-super-secret-key-change-in-production';
+const JWT_SECRET = process.env.JWT_SECRET || '6raNhvdqV4SPub3iHJ2yZkoT0UDgseY7GwtEOx8lLfIzXWpQRFm1c9KM5CnjAB';
 const JWT_EXPIRES_IN = '7d';
 
 // ========== AUTH MIDDLEWARE ==========
