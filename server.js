@@ -84,7 +84,7 @@ function authenticateRider(req, res, next) {
 
 // ========== ADMIN AUTH ENDPOINTS ==========
 
-// Admin Login (Production)
+// Admin Login
 app.post('/api/admin/login', async (req, res) => {
     const { email, password } = req.body;
     
@@ -94,17 +94,12 @@ app.post('/api/admin/login', async (req, res) => {
     
     try {
         // Check if admin exists in vendors table with admin flag
-        // Option 1: Check vendors table for admin flag
         const result = await pool.query(
-            'SELECT id, name, email, password_hash, is_admin FROM vendors WHERE email = $1 AND is_admin = true',
+            `SELECT id, name, email, phone, password_hash, is_admin 
+             FROM vendors 
+             WHERE email = $1 AND is_admin = true`,
             [email]
         );
-        
-        // Option 2: Create a separate admins table (recommended for production)
-        // const result = await pool.query(
-        //     'SELECT id, name, email, password_hash FROM admins WHERE email = $1',
-        //     [email]
-        // );
         
         if (result.rows.length === 0) {
             return res.status(401).json({ error: 'Invalid admin credentials' });
@@ -120,7 +115,7 @@ app.post('/api/admin/login', async (req, res) => {
         
         // Generate JWT token for admin
         const token = jwt.sign(
-            { id: admin.id, email: admin.email, role: 'admin' },
+            { id: admin.id, email: admin.email, name: admin.name, role: 'admin' },
             JWT_SECRET,
             { expiresIn: '7d' }
         );
