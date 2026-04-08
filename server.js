@@ -82,68 +82,7 @@ function authenticateRider(req, res, next) {
     }
 }
 
-// ========== ADMIN AUTH ENDPOINTS ==========
 
-// Admin Login
-app.post('/api/admin/login', async (req, res) => {
-    const { email, password } = req.body;
-    
-    if (!email || !password) {
-        return res.status(400).json({ error: 'Email and password are required' });
-    }
-    
-    try {
-        // Check if admin exists in vendors table with admin flag
-        const result = await pool.query(
-            `SELECT id, name, email, phone, password_hash, is_admin 
-             FROM vendors 
-             WHERE email = $1 AND is_admin = true`,
-            [email]
-        );
-        
-        if (result.rows.length === 0) {
-            return res.status(401).json({ error: 'Invalid admin credentials' });
-        }
-        
-        const admin = result.rows[0];
-        
-        // Verify password
-        const validPassword = await bcrypt.compare(password, admin.password_hash);
-        if (!validPassword) {
-            return res.status(401).json({ error: 'Invalid admin credentials' });
-        }
-        
-        // Generate JWT token for admin
-        const token = jwt.sign(
-            { id: admin.id, email: admin.email, name: admin.name, role: 'admin' },
-            JWT_SECRET,
-            { expiresIn: '7d' }
-        );
-        
-        res.json({
-            success: true,
-            token,
-            admin: {
-                id: admin.id,
-                name: admin.name,
-                email: admin.email
-            }
-        });
-    } catch (err) {
-        console.error('Admin login error:', err);
-        res.status(500).json({ error: 'Login failed' });
-    }
-});
-
-// Verify Admin Token
-app.get('/api/admin/verify', authenticateVendor, async (req, res) => {
-    // Check if user has admin role
-    if (req.vendor.role !== 'admin') {
-        return res.status(403).json({ error: 'Admin access required' });
-    }
-    
-    res.json({ valid: true, admin: req.vendor });
-});
 
 // ========== VENDOR AUTH ENDPOINTS ==========
 
@@ -1491,6 +1430,69 @@ app.get('/api/orders/test-coordinates', async (req, res) => {
         res.status(500).json({ error: err.message });
     }
 });
+
+// ========== ADMIN AUTH ENDPOINTS ==========
+
+// Admin Login
+app.post('/api/admin/login', async (req, res) => {
+    const { email, password } = req.body;
+    
+    if (!email || !password) {
+        return res.status(400).json({ error: 'Email and password are required' });
+    }
+    
+    try {
+        // Check if admin exists in vendors table with admin flag
+        const result = await pool.query(
+            `SELECT id, name, email, phone, password_hash, is_admin 
+             FROM vendors 
+             WHERE email = $1 AND is_admin = true`,
+            [email]
+        );
+        
+        if (result.rows.length === 0) {
+            return res.status(401).json({ error: 'Invalid admin credentials' });
+        }
+        
+        const admin = result.rows[0];
+        
+        // Verify password
+        const validPassword = await bcrypt.compare(password, admin.password_hash);
+        if (!validPassword) {
+            return res.status(401).json({ error: 'Invalid admin credentials' });
+        }
+        
+        // Generate JWT token for admin
+        const token = jwt.sign(
+            { id: admin.id, email: admin.email, name: admin.name, role: 'admin' },
+            JWT_SECRET,
+            { expiresIn: '7d' }
+        );
+        
+        res.json({
+            success: true,
+            token,
+            admin: {
+                id: admin.id,
+                name: admin.name,
+                email: admin.email
+            }
+        });
+    } catch (err) {
+        console.error('Admin login error:', err);
+        res.status(500).json({ error: 'Login failed' });
+    }
+});
+
+// Verify Admin Token
+app.get('/api/admin/verify', authenticateVendor, async (req, res) => {
+    // Check if user has admin role
+    if (req.vendor.role !== 'admin') {
+        return res.status(403).json({ error: 'Admin access required' });
+    }
+    res.json({ valid: true, admin: req.vendor });
+});
+
 
 app.get('/api/health', (req, res) => {
     res.json({ status: 'ok' });
