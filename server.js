@@ -1418,6 +1418,27 @@ app.get('/api/admin/verify', authenticateVendor, async (req, res) => {
 
 // ========== ADMIN PAYOUT ENDPOINTS ==========
 
+// Middleware to verify admin role
+function authenticateAdmin(req, res, next) {
+    const token = req.headers.authorization?.split(' ')[1];
+    
+    if (!token) {
+        return res.status(401).json({ error: 'Access denied. No token provided.' });
+    }
+    
+    try {
+        const decoded = jwt.verify(token, JWT_SECRET);
+        if (decoded.role !== 'admin') {
+            return res.status(403).json({ error: 'Admin access required' });
+        }
+        req.adminId = decoded.id;
+        req.admin = decoded;
+        next();
+    } catch (err) {
+        return res.status(401).json({ error: 'Invalid or expired token.' });
+    }
+}
+
 // Get all pending vendor payouts
 app.get('/api/admin/payouts/vendors/pending', authenticateAdmin, async (req, res) => {
     try {
@@ -1435,8 +1456,8 @@ app.get('/api/admin/payouts/vendors/pending', authenticateAdmin, async (req, res
         
         res.json({ payouts: result.rows });
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to fetch pending payouts' });
+        console.error('Error fetching vendor payouts:', err);
+        res.status(500).json({ error: 'Failed to fetch pending payouts', details: err.message });
     }
 });
 
@@ -1457,8 +1478,8 @@ app.get('/api/admin/payouts/riders/pending', authenticateAdmin, async (req, res)
         
         res.json({ payouts: result.rows });
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to fetch pending payouts' });
+        console.error('Error fetching rider payouts:', err);
+        res.status(500).json({ error: 'Failed to fetch pending payouts', details: err.message });
     }
 });
 
@@ -1506,62 +1527,8 @@ app.get('/api/admin/payouts/stats', authenticateAdmin, async (req, res) => {
             }
         });
     } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to fetch stats' });
-    }
-});
-
-// Get payout history
-app.get('/api/admin/payouts/history', authenticateAdmin, async (req, res) => {
-    const { type, limit = 50 } = req.query;
-    try {
-        let result;
-        if (type === 'vendors') {
-            result = await pool.query(`
-                SELECT vp.*, v.name as user_name, v.email as user_email, 'vendor' as user_type
-                FROM vendor_payouts vp
-                JOIN vendors v ON vp.vendor_id = v.id
-                WHERE vp.status IN ('completed', 'failed')
-                ORDER BY vp.processed_at DESC
-                LIMIT $1
-            `, [limit]);
-            res.json(result.rows);
-        } else if (type === 'riders') {
-            result = await pool.query(`
-                SELECT rp.*, r.name as user_name, r.email as user_email, 'rider' as user_type
-                FROM rider_payouts rp
-                JOIN riders r ON rp.rider_id = r.id
-                WHERE rp.status IN ('completed', 'failed')
-                ORDER BY rp.processed_at DESC
-                LIMIT $1
-            `, [limit]);
-            res.json(result.rows);
-        } else {
-            const vendorResult = await pool.query(`
-                SELECT vp.*, v.name as user_name, v.email as user_email, 'vendor' as user_type
-                FROM vendor_payouts vp
-                JOIN vendors v ON vp.vendor_id = v.id
-                WHERE vp.status IN ('completed', 'failed')
-                ORDER BY vp.processed_at DESC
-                LIMIT $1
-            `, [limit]);
-            
-            const riderResult = await pool.query(`
-                SELECT rp.*, r.name as user_name, r.email as user_email, 'rider' as user_type
-                FROM rider_payouts rp
-                JOIN riders r ON rp.rider_id = r.id
-                WHERE rp.status IN ('completed', 'failed')
-                ORDER BY rp.processed_at DESC
-                LIMIT $1
-            `, [limit]);
-            
-            const combined = [...vendorResult.rows, ...riderResult.rows];
-            combined.sort((a, b) => new Date(b.processed_at) - new Date(a.processed_at));
-            res.json(combined);
-        }
-    } catch (err) {
-        console.error(err);
-        res.status(500).json({ error: 'Failed to fetch history' });
+        console.error('Error fetching stats:', err);
+        res.status(500).json({ error: 'Failed to fetch stats', details: err.message });
     }
 });
 
@@ -1574,6 +1541,7 @@ app.patch('/api/admin/payouts/vendors/:payoutId/process', authenticateAdmin, asy
     try {
         await client.query('BEGIN');
         
+        // Check if payout exists and is pending
         const payoutResult = await client.query(
             `SELECT * FROM vendor_payouts WHERE id = $1 AND status = 'pending'`,
             [payoutId]
@@ -1586,6 +1554,7 @@ app.patch('/api/admin/payouts/vendors/:payoutId/process', authenticateAdmin, asy
         
         const payout = payoutResult.rows[0];
         
+        // Update payout status
         await client.query(
             `UPDATE vendor_payouts 
              SET status = 'completed', 
@@ -1596,20 +1565,26 @@ app.patch('/api/admin/payouts/vendors/:payoutId/process', authenticateAdmin, asy
             [transaction_reference, notes, payoutId]
         );
         
+        // Record transaction
         await client.query(
             `INSERT INTO vendor_transactions (vendor_id, type, amount, description, status, reference)
-             VALUES ($1, 'payout_completed', $2, $3, 'completed', $4)`,
+             VALUES ($1, 'payout', $2, $3, 'completed', $4)`,
             [payout.vendor_id, -payout.amount, 
-             `Payout of ₵${payout.amount} processed`,
+             `Payout of ₵${payout.amount} processed via ${payout.payment_method}`,
              transaction_reference || `PO-${payoutId}`]
         );
         
         await client.query('COMMIT');
-        res.json({ success: true, message: 'Payout completed' });
+        
+        res.json({ 
+            success: true, 
+            message: 'Payout processed successfully',
+            payout: { id: payout.id, status: 'completed' }
+        });
     } catch (err) {
         await client.query('ROLLBACK');
-        console.error(err);
-        res.status(500).json({ error: 'Failed to process payout' });
+        console.error('Error processing payout:', err);
+        res.status(500).json({ error: 'Failed to process payout', details: err.message });
     } finally {
         client.release();
     }
@@ -1636,6 +1611,7 @@ app.patch('/api/admin/payouts/vendors/:payoutId/reject', authenticateAdmin, asyn
         
         const payout = payoutResult.rows[0];
         
+        // Update payout status to failed
         await client.query(
             `UPDATE vendor_payouts 
              SET status = 'failed', 
@@ -1644,6 +1620,7 @@ app.patch('/api/admin/payouts/vendors/:payoutId/reject', authenticateAdmin, asyn
             [reason, payoutId]
         );
         
+        // Return funds to vendor wallet
         await client.query(
             `UPDATE vendor_wallets 
              SET balance = balance + $1
@@ -1651,121 +1628,24 @@ app.patch('/api/admin/payouts/vendors/:payoutId/reject', authenticateAdmin, asyn
             [payout.amount, payout.vendor_id]
         );
         
+        // Record transaction
         await client.query(
             `INSERT INTO vendor_transactions (vendor_id, type, amount, description, status)
              VALUES ($1, 'payout_rejected', $2, $3, 'completed')`,
-            [payout.vendor_id, payout.amount, `Payout rejected: ${reason || 'Not specified'}`]
+            [payout.vendor_id, payout.amount, `Payout rejected. Reason: ${reason || 'Not specified'}`]
         );
         
         await client.query('COMMIT');
-        res.json({ success: true, message: 'Payout rejected and funds returned' });
+        
+        res.json({ 
+            success: true, 
+            message: 'Payout rejected and funds returned',
+            payout: { id: payout.id, status: 'failed' }
+        });
     } catch (err) {
         await client.query('ROLLBACK');
-        console.error(err);
-        res.status(500).json({ error: 'Failed to reject payout' });
-    } finally {
-        client.release();
-    }
-});
-
-// Process a rider payout
-app.patch('/api/admin/payouts/riders/:payoutId/process', authenticateAdmin, async (req, res) => {
-    const { payoutId } = req.params;
-    const { transaction_reference, notes } = req.body;
-    
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        
-        const payoutResult = await client.query(
-            `SELECT * FROM rider_payouts WHERE id = $1 AND status = 'pending'`,
-            [payoutId]
-        );
-        
-        if (payoutResult.rows.length === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ error: 'Payout not found or already processed' });
-        }
-        
-        const payout = payoutResult.rows[0];
-        
-        await client.query(
-            `UPDATE rider_payouts 
-             SET status = 'completed', 
-                 processed_at = NOW(),
-                 reference = COALESCE($1, reference),
-                 notes = COALESCE($2, notes)
-             WHERE id = $3`,
-            [transaction_reference, notes, payoutId]
-        );
-        
-        await client.query(
-            `INSERT INTO rider_transactions (rider_id, type, amount, description, status, reference)
-             VALUES ($1, 'payout_completed', $2, $3, 'completed', $4)`,
-            [payout.rider_id, -payout.amount,
-             `Payout of ₵${payout.amount} processed`,
-             transaction_reference || `PO-${payoutId}`]
-        );
-        
-        await client.query('COMMIT');
-        res.json({ success: true, message: 'Payout completed' });
-    } catch (err) {
-        await client.query('ROLLBACK');
-        console.error(err);
-        res.status(500).json({ error: 'Failed to process payout' });
-    } finally {
-        client.release();
-    }
-});
-
-// Reject a rider payout
-app.patch('/api/admin/payouts/riders/:payoutId/reject', authenticateAdmin, async (req, res) => {
-    const { payoutId } = req.params;
-    const { reason } = req.body;
-    
-    const client = await pool.connect();
-    try {
-        await client.query('BEGIN');
-        
-        const payoutResult = await client.query(
-            `SELECT * FROM rider_payouts WHERE id = $1 AND status = 'pending'`,
-            [payoutId]
-        );
-        
-        if (payoutResult.rows.length === 0) {
-            await client.query('ROLLBACK');
-            return res.status(404).json({ error: 'Payout not found' });
-        }
-        
-        const payout = payoutResult.rows[0];
-        
-        await client.query(
-            `UPDATE rider_payouts 
-             SET status = 'failed', 
-                 notes = COALESCE($1, notes)
-             WHERE id = $2`,
-            [reason, payoutId]
-        );
-        
-        await client.query(
-            `UPDATE rider_wallets 
-             SET balance = balance + $1
-             WHERE rider_id = $2`,
-            [payout.amount, payout.rider_id]
-        );
-        
-        await client.query(
-            `INSERT INTO rider_transactions (rider_id, type, amount, description, status)
-             VALUES ($1, 'payout_rejected', $2, $3, 'completed')`,
-            [payout.rider_id, payout.amount, `Payout rejected: ${reason || 'Not specified'}`]
-        );
-        
-        await client.query('COMMIT');
-        res.json({ success: true, message: 'Payout rejected and funds returned' });
-    } catch (err) {
-        await client.query('ROLLBACK');
-        console.error(err);
-        res.status(500).json({ error: 'Failed to reject payout' });
+        console.error('Error rejecting payout:', err);
+        res.status(500).json({ error: 'Failed to reject payout', details: err.message });
     } finally {
         client.release();
     }
