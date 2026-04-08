@@ -559,6 +559,23 @@ app.post('/api/orders', async (req, res) => {
     try {
         await client.query('BEGIN');
         
+        // Get the vendor_id from the first item's product
+        // All items in a cart should belong to the same vendor
+        const firstItem = items[0];
+        const productResult = await client.query(
+            'SELECT vendor_id FROM products WHERE id = $1',
+            [firstItem.id]
+        );
+        
+        if (productResult.rows.length === 0) {
+            await client.query('ROLLBACK');
+            return res.status(400).json({ error: 'Invalid product' });
+        }
+        
+        const vendorId = productResult.rows[0].vendor_id;
+        
+        console.log(`Creating order for vendor_id: ${vendorId}`); // For debugging
+        
         const orderResult = await client.query(
             `INSERT INTO orders
              (customer_name, customer_phone, location, instructions, subtotal, delivery_fee, total, status, vendor_id, 
@@ -574,7 +591,7 @@ app.post('/api/orders', async (req, res) => {
                 5.00, 
                 total, 
                 'pending', 
-                1,
+                vendorId,  // ✅ Now using actual vendor_id from product
                 'pending',
                 payment_method || 'cash',
                 delivery_latitude || null,
@@ -595,7 +612,7 @@ app.post('/api/orders', async (req, res) => {
         res.status(201).json({ orderId, message: 'Order placed successfully' });
     } catch (err) {
         await client.query('ROLLBACK');
-        console.error(err);
+        console.error('Order creation error:', err);
         res.status(500).json({ error: 'Failed to place order' });
     } finally {
         client.release();
